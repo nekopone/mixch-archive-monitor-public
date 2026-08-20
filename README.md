@@ -22,9 +22,10 @@ GitHub Actionsの実行場所を一時的に公開リポジトリへ移すため
 
 ## 必要なRepository secrets
 
-- `PRIVATE_DATA_SSH_KEY`: `nekopone/mixch` だけを読み書きできる一時Deploy key
-
-既存の秘密値を非公開リポジトリから取り出すことはできないため、この一時運用ではDiscord通知を行いません。監視結果と状態ファイルの更新は従来どおり非公開リポジトリへ保存します。
+- `PRIVATE_DATA_TOKEN`: 非公開データリポジトリのContentsを読み書きできるトークン
+- `MIXCHAT_ID`
+- `MIXCHAT_PASS`
+- `DISCORD_WEBHOOK_URL`
 
 トークンは対象リポジトリとContents権限だけに絞り、期限を設定してください。
 

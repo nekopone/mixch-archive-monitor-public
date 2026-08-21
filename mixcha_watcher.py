@@ -47,6 +47,10 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 LATEST_MARKER_SELECTOR = "span.css-lmrlel.e1hhguts0"
 LATEST_MARKER_PATTERN = re.compile(r"(\d+:\d+)$")
 LATEST_ARCHIVE_AGE_PATTERN = re.compile(r"(\d+)(秒|分|時間|日)前")
+LATEST_ARCHIVE_AGE_EN_PATTERN = re.compile(
+    r"(\d+)\s*(seconds?|minutes?|hours?|days?)\s+ago",
+    re.IGNORECASE,
+)
 LATEST_MARKER_TEXT_SCRIPT = """
 const element = document.querySelector(arguments[0]);
 if (!element) {
@@ -74,6 +78,10 @@ CHROME_BINARY_CANDIDATES = (
     "chromium-browser",
 )
 PROCESS_START = time.perf_counter()
+
+
+class DiscordDeliveryError(RuntimeError):
+    """Raised when a Discord notification cannot be delivered safely."""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -201,23 +209,28 @@ def extract_latest_archive_date(
 ) -> Optional[str]:
     """Infer the latest archive date from Mixch's rendered relative age.
 
-    The latest archive card already contains text such as ``3時間前 28:40``
-    or ``21日前 89:41``. Reusing it avoids another page/API request for every
-    watched user. Seconds, minutes and hours all belong to the reference date;
-    the site switches to an integer day count after 24 hours.
+    The latest archive card contains text such as ``3時間前 28:40`` or
+    ``19 hours ago56:49`` depending on the runner locale. Reusing it avoids
+    another page/API request for every watched user. Seconds, minutes and hours
+    all belong to the reference date; the site switches to an integer day count
+    after 24 hours.
     """
 
     if text is None:
         return None
 
     normalized_text = str(text).strip().replace("\xa0", " ")
-    match = LATEST_ARCHIVE_AGE_PATTERN.search(normalized_text)
-    if match is None:
-        return None
+    japanese_match = LATEST_ARCHIVE_AGE_PATTERN.search(normalized_text)
+    if japanese_match is not None:
+        amount = int(japanese_match.group(1))
+        days_ago = amount if japanese_match.group(2) == "日" else 0
+    else:
+        english_match = LATEST_ARCHIVE_AGE_EN_PATTERN.search(normalized_text)
+        if english_match is None:
+            return None
+        amount = int(english_match.group(1))
+        days_ago = amount if english_match.group(2).lower().startswith("day") else 0
 
-    amount = int(match.group(1))
-    unit = match.group(2)
-    days_ago = amount if unit == "日" else 0
     return (reference_date - datetime.timedelta(days=days_ago)).isoformat()
 
 
@@ -560,8 +573,17 @@ def split_lines_by_limit(lines: List[str], limit: int = DESCRIPTION_LIMIT) -> Li
     return chunks
 
 
+def get_discord_webhook_url() -> str:
+    """Return the configured webhook or fail without exposing its value."""
+
+    url = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+    if not url:
+        raise DiscordDeliveryError("DISCORD_WEBHOOK_URL が設定されていません")
+    return url
+
+
 def send_embeds_to_discord(title: str, lines: List[str], empty_description: str = None) -> List[float]:
-    url = os.getenv("DISCORD_WEBHOOK_URL")
+    url = get_discord_webhook_url()
     descriptions = split_lines_by_limit(lines) if lines else [empty_description or ""]
     total = len(descriptions)
     send_elapsed_points: List[float] = []
@@ -580,10 +602,6 @@ def send_embeds_to_discord(title: str, lines: List[str], empty_description: str 
             has_webhook_url=bool(url),
         )
 
-        if not url:
-            logging.warning("⚠️ DISCORD_WEBHOOK_URL が設定されていないため、通知をスキップします")
-            continue
-
         payload = {
             "embeds": [
                 {
@@ -601,7 +619,6 @@ def send_embeds_to_discord(title: str, lines: List[str], empty_description: str 
                 timeout=10,
             )
             elapsed_sec = round(time.perf_counter() - send_start, 3)
-            send_elapsed_points.append(round(time.perf_counter() - PROCESS_START, 3))
             log_metric(
                 "discord_send_end",
                 title=embed_title,
@@ -611,9 +628,13 @@ def send_embeds_to_discord(title: str, lines: List[str], empty_description: str 
                 response_text_head=resp.text[:200],
             )
             if resp.ok:
+                send_elapsed_points.append(round(time.perf_counter() - PROCESS_START, 3))
                 logging.info(f"Discord送信成功: {embed_title}")
             else:
                 logging.error(f"Discord送信失敗: {resp.status_code} {resp.text}")
+                raise DiscordDeliveryError(
+                    f"Discord通知がHTTP {resp.status_code}で拒否されました"
+                )
         except requests.RequestException as exc:
             elapsed_sec = round(time.perf_counter() - send_start, 3)
             log_metric(
@@ -623,7 +644,16 @@ def send_embeds_to_discord(title: str, lines: List[str], empty_description: str 
                 error_type=type(exc).__name__,
                 error_message=str(exc),
             )
-            logging.error(f"Discord送信例外: {embed_title} {type(exc).__name__}: {exc}")
+            logging.error(
+                "Discord送信例外: %s error_type=%s",
+                embed_title,
+                type(exc).__name__,
+            )
+            # requestsの例外文にはWebhook URLが含まれる場合があります。
+            # 公開Actionsログへ秘密値を出さず、ワークフローだけを失敗させます。
+            raise DiscordDeliveryError(
+                f"Discord通知の通信に失敗しました ({type(exc).__name__})"
+            ) from None
 
     return send_elapsed_points
 
@@ -671,6 +701,10 @@ def main():
         state_file=STATE_FILE,
         activity_state_file=ACTIVITY_STATE_FILE,
     )
+
+    # 通知先がない状態で監視済みデータだけを進めると、次回以降も通知を
+    # 再試行できません。ページ取得より前に設定不備を検出して終了します。
+    get_discord_webhook_url()
 
     watchlist = load_watchlist(WATCHLIST_FILE)
     original_watchlist_count = len(watchlist)

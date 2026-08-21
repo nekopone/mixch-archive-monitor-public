@@ -238,6 +238,19 @@ class WorkflowSynchronizationTests(unittest.TestCase):
         self.assertIn("Validate Discord notification secret", workflow)
         self.assertIn("DISCORD_WEBHOOK_URL is not configured", workflow)
 
+    def test_replay_mode_does_not_run_or_commit_normal_monitor_state(self):
+        workflow_path = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "schedule.yml"
+        )
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn("Replay missed notifications", workflow)
+        self.assertIn("inputs.replay_base == ''", workflow)
+        self.assertIn("inputs.replay_base != ''", workflow)
+
     def test_public_workflow_has_temporary_cutoff(self):
         workflow_path = (
             Path(__file__).resolve().parents[1]

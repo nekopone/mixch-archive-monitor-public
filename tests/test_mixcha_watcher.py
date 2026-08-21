@@ -79,6 +79,25 @@ class MarkerExtractionTests(unittest.TestCase):
         self.assertIsNone(watcher.extract_latest_marker("時間を解析できません"))
         self.assertIsNone(watcher.extract_latest_marker(None))
 
+    def test_extract_latest_archive_date_supports_japanese_and_english(self):
+        reference_date = watcher.datetime.date(2026, 8, 21)
+
+        self.assertEqual(
+            "2026-08-21",
+            watcher.extract_latest_archive_date("3時間前 28:40", reference_date),
+        )
+        self.assertEqual(
+            "2026-08-21",
+            watcher.extract_latest_archive_date("19 hours ago56:49", reference_date),
+        )
+        self.assertEqual(
+            "2026-08-02",
+            watcher.extract_latest_archive_date("19 days ago6:58", reference_date),
+        )
+        self.assertIsNone(
+            watcher.extract_latest_archive_date("relative age unavailable", reference_date)
+        )
+
     def test_ready_marker_skips_fixed_wait_scroll_and_full_html(self):
         driver = ImmediateMarkerDriver()
 
@@ -207,6 +226,18 @@ class WorkflowSynchronizationTests(unittest.TestCase):
         self.assertIn("MIXCH_DATA_DIR: private-data", workflow)
         self.assertIn("PUBLIC_LOGS: 'true'", workflow)
 
+    def test_missing_discord_secret_fails_before_watcher_runs(self):
+        workflow_path = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "schedule.yml"
+        )
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn("Validate Discord notification secret", workflow)
+        self.assertIn("DISCORD_WEBHOOK_URL is not configured", workflow)
+
     def test_public_workflow_has_temporary_cutoff(self):
         workflow_path = (
             Path(__file__).resolve().parents[1]
@@ -242,6 +273,34 @@ class PublicLogPrivacyTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"SCHEDULE_CRON": "7 10 * * *"}, clear=False):
             self.assertFalse(watcher.is_last_daily_inactive_notification_run())
+
+
+class DiscordDeliveryTests(unittest.TestCase):
+    def test_missing_webhook_is_a_fatal_configuration_error(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(watcher.DiscordDeliveryError):
+                watcher.get_discord_webhook_url()
+
+    def test_http_failure_is_fatal_without_exposing_webhook(self):
+        class RejectedResponse:
+            status_code = 401
+            ok = False
+            text = "rejected"
+
+        secret_url = "https://discord.invalid/api/webhooks/secret-value"
+        with (
+            patch.dict(
+                os.environ,
+                {"DISCORD_WEBHOOK_URL": secret_url},
+                clear=False,
+            ),
+            patch.object(watcher.requests, "post", return_value=RejectedResponse()),
+            patch.object(watcher, "log_metric"),
+        ):
+            with self.assertRaises(watcher.DiscordDeliveryError) as raised:
+                watcher.send_embeds_to_discord("test", ["message"])
+
+        self.assertNotIn(secret_url, str(raised.exception))
 
 
 if __name__ == "__main__":

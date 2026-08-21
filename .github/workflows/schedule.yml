@@ -104,6 +104,17 @@ jobs:
         run: |
           : > run_metrics.jsonl
 
+      - name: Validate Discord notification secret
+        if: steps.temporary.outputs.run == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          if [[ -z "${DISCORD_WEBHOOK_URL}" ]]; then
+            echo "::error::DISCORD_WEBHOOK_URL is not configured for this repository."
+            exit 1
+          fi
+
       - name: Run watcher
         if: steps.temporary.outputs.run == 'true'
         env:
